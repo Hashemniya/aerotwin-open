@@ -100,34 +100,42 @@ def main():
             model = XGBRegressor(n_estimators=200, max_depth=4, learning_rate=0.05, n_jobs=2)
             model.fit(train[feature_cols], train["residual"])
 
-            # Get calibration-set absolute errors of the hybrid prediction
+           # Get calibration-set signed errors: true - pred
+            # positive error => model UNDER-predicted (true was higher) => risk for upper-limit checks (NH4, NO3)
+            # negative error => model OVER-predicted (true was lower) => risk for lower-limit checks (O2)
             calib_correction = model.predict(calib[feature_cols])
             calib_hybrid_pred = calib["physics_pred"].values + calib_correction
-            calib_abs_err = np.abs(calib_hybrid_pred - calib["true_target"].values)
-            half_width = np.quantile(calib_abs_err, CONFIDENCE)
+            calib_err = calib["true_target"].values - calib_hybrid_pred  # true - pred
 
-            # Apply fixed half-width to test set, check coverage
+            upper_margin = np.quantile(calib_err[calib_err > 0], CONFIDENCE) if (calib_err > 0).any() else 0.0
+            lower_margin = np.quantile(-calib_err[calib_err < 0], CONFIDENCE) if (calib_err < 0).any() else 0.0
+
+            # Apply asymmetric bounds to test set, check coverage
             test_correction = model.predict(test[feature_cols])
             test_hybrid_pred = test["physics_pred"].values + test_correction
-            lower = test_hybrid_pred - half_width
-            upper = test_hybrid_pred + half_width
+            lower = test_hybrid_pred - lower_margin
+            upper = test_hybrid_pred + upper_margin
             covered = (test["true_target"].values >= lower) & (test["true_target"].values <= upper)
             coverage = covered.mean()
 
             results.append({
                 "target": target, "horizon_min": h_min,
-                "interval_half_width": round(half_width, 4),
+                "upper_margin": round(upper_margin, 4),
+                "lower_margin": round(lower_margin, 4),
                 "target_coverage": CONFIDENCE,
                 "actual_coverage": round(coverage, 3),
             })
-            print(f"{target:20s} {h_min:>5d}min  half_width={half_width:.3f}  "
+            print(f"{target:20s} {h_min:>5d}min  upper_margin={upper_margin:.3f}  lower_margin={lower_margin:.3f}  "
                   f"target_cov={CONFIDENCE}  actual_cov={coverage:.3f}")
 
     report = pd.DataFrame(results)
     report.to_csv("aerotwin/data/processed/uncertainty_report.csv", index=False)
 
     # Save per-target/horizon half-widths for later use by the optimizer/dashboard
-    widths_dict = {f"{r['target']}_{r['horizon_min']}": r["interval_half_width"] for r in results}
+    widths_dict = {
+        f"{r['target']}_{r['horizon_min']}": {"upper": r["upper_margin"], "lower": r["lower_margin"]}
+        for r in results
+    }
     np.save("aerotwin/models/uncertainty_widths.npy", widths_dict)
     print("\nSaved uncertainty report and widths.")
 
