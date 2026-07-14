@@ -1,3 +1,5 @@
 aerotwin/venv/
 __pycache__/
 *.pyc
+aerotwin/data/raw/
+aerotwin/data/processed/
