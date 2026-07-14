@@ -49,7 +49,7 @@ def main():
         sub["unit"] = unit
         sub["value_type"] = value_type
         sub["source"] = "SCADA"
-        sub["quality"] = sub["quality_raw"].apply(lambda q: "good" if q == 1 else "bad")
+        sub["quality"] = sub["quality_raw"].apply(lambda q: "good" if q == 0 else "bad")
         sub = sub.drop(columns=["quality_raw"])
         frames.append(sub)
         print(f"  {reactor_id:6s} {variable:20s} {len(sub):>8,} rows")
