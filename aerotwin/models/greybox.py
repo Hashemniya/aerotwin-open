@@ -9,20 +9,30 @@ STATE_COLS = ["ammonium", "nitrate", "dissolved_oxygen"]
 DRIVER_COLS = ["airflow", "temperature", "oxygen_setpoint"]
 
 
+INFLUENT_NH4 = 25.0   # typical raw influent ammonium, mg/L (rough municipal default)
+INFLUENT_NO3 = 0.2    # typical raw influent nitrate, mg/L (usually near zero pre-treatment)
+
+
 def step(state, drivers, params):
-    """One Euler integration step of the simplified biology model."""
+    """One Euler integration step of the simplified biology model, with dilution."""
     nh4, no3, o2 = state
     airflow, temp, o2_setpoint = drivers
-    k_nit, K_NH4, K_O2, k_aer, k_resp, theta = params
+    k_nit, K_NH4, K_O2, k_aer, k_resp, theta, k_dil = params
 
     temp_factor = theta ** (temp - 15.0)  # Arrhenius-style correction, ref 15C
 
     nit_rate = k_nit * temp_factor * (nh4 / (nh4 + K_NH4 + 1e-6)) * (o2 / (o2 + K_O2 + 1e-6))
 
-    d_nh4 = -nit_rate
-    d_no3 = 0.6 * nit_rate  # not all nitrified N shows as NO3 (some lost to gas/uptake)
+    # Dilution: continuous exchange with incoming wastewater pulls concentrations
+    # toward influent levels, independent of the biological reaction.
+    dil_nh4 = k_dil * (INFLUENT_NH4 - nh4)
+    dil_no3 = k_dil * (INFLUENT_NO3 - no3)
+    dil_o2 = k_dil * (0.0 - o2)  # incoming wastewater is essentially anoxic
+
+    d_nh4 = -nit_rate + dil_nh4
+    d_no3 = 0.6 * nit_rate + dil_no3  # not all nitrified N shows as NO3 (some lost to gas/uptake)
     aeration_input = k_aer * max(airflow, 0.0) * max(o2_setpoint - o2, 0.0)
-    d_o2 = aeration_input - 4.3 * nit_rate - k_resp
+    d_o2 = aeration_input - 4.3 * nit_rate - k_resp + dil_o2
 
     nh4_next = max(nh4 + d_nh4 * DT_HOURS, 0.0)
     no3_next = max(no3 + d_no3 * DT_HOURS, 0.0)
@@ -47,15 +57,19 @@ def loss_fn(params, state_arr, driver_arr, next_arr, scales):
     """Vectorized one-step-ahead prediction error, normalized per variable."""
     nh4, no3, o2 = state_arr[:, 0], state_arr[:, 1], state_arr[:, 2]
     airflow, temp, o2_setpoint = driver_arr[:, 0], driver_arr[:, 1], driver_arr[:, 2]
-    k_nit, K_NH4, K_O2, k_aer, k_resp, theta = params
+    k_nit, K_NH4, K_O2, k_aer, k_resp, theta, k_dil = params
 
     temp_factor = theta ** (temp - 15.0)
     nit_rate = k_nit * temp_factor * (nh4 / (nh4 + K_NH4 + 1e-6)) * (o2 / (o2 + K_O2 + 1e-6))
 
-    d_nh4 = -nit_rate
-    d_no3 = 0.6 * nit_rate
+    dil_nh4 = k_dil * (INFLUENT_NH4 - nh4)
+    dil_no3 = k_dil * (INFLUENT_NO3 - no3)
+    dil_o2 = k_dil * (0.0 - o2)
+
+    d_nh4 = -nit_rate + dil_nh4
+    d_no3 = 0.6 * nit_rate + dil_no3
     aeration_input = k_aer * np.clip(airflow, 0, None) * np.clip(o2_setpoint - o2, 0, None)
-    d_o2 = aeration_input - 4.3 * nit_rate - k_resp
+    d_o2 = aeration_input - 4.3 * nit_rate - k_resp + dil_o2
 
     nh4_next = np.clip(nh4 + d_nh4 * DT_HOURS, 0, None)
     no3_next = np.clip(no3 + d_no3 * DT_HOURS, 0, None)
@@ -84,15 +98,16 @@ def main():
     next_arr = train_slice[STATE_COLS].values[sample_idx + 1].astype(float)
     scales = train_slice[STATE_COLS].std().values
 
-    x0 = [0.3, 1.0, 0.5, 0.02, 0.05, 1.03]  # k_nit, K_NH4, K_O2, k_aer, k_resp, theta
-    bounds = [(0.01, 2.0), (0.1, 5.0), (0.05, 3.0), (0.001, 0.5), (0.0, 0.5), (1.0, 1.1)]
+    x0 = [0.3, 1.0, 0.5, 0.02, 0.05, 1.03, 0.05]  # k_nit, K_NH4, K_O2, k_aer, k_resp, theta, k_dil
+    bounds = [(0.01, 2.0), (0.1, 5.0), (0.05, 3.0), (0.001, 0.5), (0.0, 0.5), (1.0, 1.1), (0.001, 0.5)]
 
     print("Calibrating grey-box parameters (vectorized, should take a few seconds)...")
     result = minimize(loss_fn, x0, args=(state_arr, driver_arr, next_arr, scales), bounds=bounds,
                        method="L-BFGS-B", options={"maxiter": 100})
     print(f"Calibration finished. Loss: {result.fun:.5f}")
     print(f"Params: k_nit={result.x[0]:.3f}, K_NH4={result.x[1]:.3f}, K_O2={result.x[2]:.3f}, "
-          f"k_aer={result.x[3]:.4f}, k_resp={result.x[4]:.4f}, theta={result.x[5]:.4f}")
+          f"k_aer={result.x[3]:.4f}, k_resp={result.x[4]:.4f}, theta={result.x[5]:.4f}, "
+          f"k_dil={result.x[6]:.4f}")
 
     np.save("aerotwin/models/greybox_params.npy", result.x)
     print("Saved params to aerotwin/models/greybox_params.npy")

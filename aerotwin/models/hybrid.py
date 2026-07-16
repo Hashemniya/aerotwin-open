@@ -13,18 +13,26 @@ HORIZONS_MIN = [30, 120, 360, 1440]
 STEP_MIN = 10
 
 
+INFLUENT_NH4 = 25.0
+INFLUENT_NO3 = 0.2
+
+
 def step_vec(state_arr, driver_arr, params):
     nh4, no3, o2 = state_arr[:, 0], state_arr[:, 1], state_arr[:, 2]
     airflow, temp, o2_setpoint = driver_arr[:, 0], driver_arr[:, 1], driver_arr[:, 2]
-    k_nit, K_NH4, K_O2, k_aer, k_resp, theta = params
+    k_nit, K_NH4, K_O2, k_aer, k_resp, theta, k_dil = params
 
     temp_factor = theta ** (temp - 15.0)
     nit_rate = k_nit * temp_factor * (nh4 / (nh4 + K_NH4 + 1e-6)) * (o2 / (o2 + K_O2 + 1e-6))
 
-    d_nh4 = -nit_rate
-    d_no3 = 0.6 * nit_rate
+    dil_nh4 = k_dil * (INFLUENT_NH4 - nh4)
+    dil_no3 = k_dil * (INFLUENT_NO3 - no3)
+    dil_o2 = k_dil * (0.0 - o2)
+
+    d_nh4 = -nit_rate + dil_nh4
+    d_no3 = 0.6 * nit_rate + dil_no3
     aeration_input = k_aer * np.clip(airflow, 0, None) * np.clip(o2_setpoint - o2, 0, None)
-    d_o2 = aeration_input - 4.3 * nit_rate - k_resp
+    d_o2 = aeration_input - 4.3 * nit_rate - k_resp + dil_o2
 
     nh4_next = np.clip(nh4 + d_nh4 * DT_HOURS, 0, None)
     no3_next = np.clip(no3 + d_no3 * DT_HOURS, 0, None)
