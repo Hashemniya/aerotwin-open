@@ -158,11 +158,12 @@ def main():
         print("No recommendation: all candidate plans violate safety limits under current conditions.")
 
 
-def scan_history(df, params, widths_dict, n_samples=200):
+def scan_history(df, params, widths_dict, n_samples=200, seed=42):
     """Run the optimizer at many random historical points to see overall behavior."""
+    rng = np.random.default_rng(seed)
     valid_start = 200
     valid_end = len(df) - STEPS_24H - 1
-    sample_points = np.random.choice(range(valid_start, valid_end), size=n_samples, replace=False)
+    sample_points = rng.choice(range(valid_start, valid_end), size=n_samples, replace=False)
 
     safe_count = 0
     rejected_count = 0
